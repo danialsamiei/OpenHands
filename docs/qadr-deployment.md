@@ -3,7 +3,7 @@
 This fork is prepared for a Persian-first deployment on `hands.gantor.ir`.
 
 ## Scope
-- Public GUI for OpenHands on QADR
+- Private, authenticated deployment of OpenHands on QADR (access restricted via Caddy `basic_auth`)
 - Persian available in the UI language selector
 - RTL-aware document language handling for Persian and Arabic
 - Reverse proxy through the shared QADR Caddy ingress
@@ -20,10 +20,11 @@ This fork is prepared for a Persian-first deployment on `hands.gantor.ir`.
 
 ## Minimal rollout on QADR
 1. Create the host directories.
-2. Copy `.env.qadr.example` to `.env.qadr` and adjust values if needed.
+2. Copy `.env.qadr.example` to `.env.qadr`. Set `JWT_SECRET` to a strong random value (used as the app-server encryption key).
 3. Create `config.toml` inside the state directory from `config.qadr.example.toml`.
-4. Replace the placeholder LiteLLM key in `config.toml` with a dedicated service key.
-5. Start the stack:
+4. In `config.toml`, replace `REPLACE_WITH_LITELLM_MASTER_KEY` with a dedicated service key, and replace `REPLACE_WITH_STRONG_JWT_SECRET` with a separate strong random value (used for OpenHands session tokens).
+5. Configure Caddy `basic_auth` for `hands.gantor.ir` (see [Restricting Access](#restricting-access)).
+6. Start the stack:
 
 ```bash
 docker compose --env-file .env.qadr -f compose.qadr.yaml up -d --build
@@ -35,6 +36,27 @@ The source-of-truth ingress block is maintained in the QADR `freegpt` repository
 
 Expected site:
 - `hands.gantor.ir -> qadr-openhands:3000`
+
+## Restricting Access
+
+The deployment is made private by adding Caddy [`basic_auth`](https://caddyserver.com/docs/caddyfile/directives/basic_auth)
+in front of the reverse-proxy site block.  Add the following inside the `hands.gantor.ir` site block in the Caddyfile:
+
+```caddyfile
+hands.gantor.ir {
+    basic_auth {
+        # Generate hash with: caddy hash-password --plaintext YOUR_PASSWORD
+        YOUR_USERNAME BCRYPT_HASH_OF_PASSWORD
+    }
+    reverse_proxy qadr-openhands:3000
+}
+```
+
+Regenerate the hash any time the password changes:
+
+```bash
+docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
+```
 
 ## DNS
 Add:

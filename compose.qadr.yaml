@@ -18,6 +18,7 @@ services:
       SERVE_FRONTEND: "true"
       FILE_STORE: local
       FILE_STORE_PATH: /.openhands
+      JWT_SECRET: ${JWT_SECRET}
     ports:
       - "127.0.0.1:${OPENHANDS_PORT:-39030}:3000"
     extra_hosts:

@@ -5,6 +5,7 @@ file_store_path = "/.openhands"
 runtime = "docker"
 enable_browser = true
 default_agent = "CodeActAgent"
+jwt_secret = "REPLACE_WITH_STRONG_JWT_SECRET"
 
 [llm]
 model = "openai/gpt-4.1-mini"
