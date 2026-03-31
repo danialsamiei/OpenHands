@@ -11,9 +11,11 @@ from server.auth.constants import (
     BITBUCKET_APP_CLIENT_ID,
     BITBUCKET_DATA_CENTER_CLIENT_ID,
     ENABLE_ENTERPRISE_SSO,
+    ENABLE_FREEGPT_SSO,
     ENABLE_JIRA,
     ENABLE_JIRA_DC,
     ENABLE_LINEAR,
+    FREEGPT_IDP_URL_EXT,
     GITHUB_APP_CLIENT_ID,
     GITHUB_APP_PRIVATE_KEY,
     GITHUB_APP_WEBHOOK_SECRET,
@@ -129,7 +131,7 @@ class SaaSServerConfig(ServerConfig):
         # Check if the response is successful
         if response.status_code != 200:
             raise ValueError(
-                f'Failed to retrieve app info, status code:{response.status_code}, message:{response.content.decode('utf-8')}'
+                f'Failed to retrieve app info, status code:{response.status_code}, message:{response.content.decode("utf-8")}'
             )
 
         # Extract the app slug from the response
@@ -194,5 +196,60 @@ class SaaSServerConfig(ServerConfig):
 
         if RECAPTCHA_SITE_KEY:
             config['RECAPTCHA_SITE_KEY'] = RECAPTCHA_SITE_KEY
+
+        return config
+
+
+class FreeGPTServerConfig(ServerConfig):
+    """Server configuration for FreeGPT.ir integrated deployment.
+
+    Uses the FreeGPT OIDC Identity Provider for authentication and
+    FreeGPT's LiteLLM as the model backend.
+    """
+
+    config_cls: str = os.environ.get('OPENHANDS_CONFIG_CLS', '')
+    app_mode: AppMode = AppMode.SAAS
+    posthog_client_key: str = os.environ.get('POSTHOG_CLIENT_KEY', '')
+    github_client_id: str = os.environ.get('GITHUB_APP_CLIENT_ID', '')
+    enable_billing = False
+    hide_llm_settings = True  # LLM settings are managed by FreeGPT
+    settings_store_class: str = (
+        'openhands.storage.settings.file_settings_store.FileSettingsStore'
+    )
+    secret_store_class: str = (
+        'openhands.storage.secrets.file_secrets_store.FileSecretsStore'
+    )
+    conversation_store_class: str = (
+        'openhands.storage.conversation.file_conversation_store.FileConversationStore'
+    )
+    conversation_manager_class: str = os.environ.get(
+        'CONVERSATION_MANAGER_CLASS',
+        'openhands.server.conversation_manager.standalone_conversation_manager.StandaloneConversationManager',
+    )
+    monitoring_listener_class: str = 'openhands.server.monitoring.MonitoringListener'
+    user_auth_class: str = 'server.auth.freegpt_user_auth.FreeGPTUserAuth'
+
+    app_slug: None | str = None
+
+    def verify_config(self):
+        if not ENABLE_FREEGPT_SSO:
+            raise ValueError('ENABLE_FREEGPT_SSO must be set for FreeGPTServerConfig')
+
+    def get_config(self):
+        config: dict[str, typing.Any] = {
+            'APP_MODE': self.app_mode,
+            'POSTHOG_CLIENT_KEY': self.posthog_client_key,
+            'FEATURE_FLAGS': {
+                'ENABLE_BILLING': False,
+                'HIDE_LLM_SETTINGS': True,
+            },
+            'PROVIDERS_CONFIGURED': [],
+        }
+
+        if ENABLE_FREEGPT_SSO and FREEGPT_IDP_URL_EXT:
+            config['FREEGPT_SSO'] = {
+                'enabled': True,
+                'idp_url': FREEGPT_IDP_URL_EXT,
+            }
 
         return config

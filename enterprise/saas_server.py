@@ -26,7 +26,7 @@ from server.logger import logger  # noqa: E402
 from server.middleware import SetAuthCookieMiddleware  # noqa: E402
 from server.rate_limit import setup_rate_limit_handler  # noqa: E402
 from server.routes.api_keys import api_router as api_keys_router  # noqa: E402
-from server.routes.auth import api_router, oauth_router  # noqa: E402
+from server.routes.auth import api_router, freegpt_router, oauth_router  # noqa: E402
 from server.routes.billing import billing_router  # noqa: E402
 from server.routes.email import api_router as email_router  # noqa: E402
 from server.routes.event_webhook import event_webhook_router  # noqa: E402
@@ -82,6 +82,7 @@ def is_saas():
 base_app.include_router(readiness_router)  # Add routes for readiness checks
 base_app.include_router(api_router)  # Add additional route for github auth
 base_app.include_router(oauth_router)  # Add additional route for oauth callback
+base_app.include_router(freegpt_router)  # Add FreeGPT.ir SSO callback route
 base_app.include_router(oauth_device_router)  # Add OAuth 2.0 Device Flow routes
 base_app.include_router(saas_user_router)  # Add additional route SAAS user calls
 base_app.include_router(user_app_settings_router)  # Add routes for user app settings

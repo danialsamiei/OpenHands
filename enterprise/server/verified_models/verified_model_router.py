@@ -134,10 +134,65 @@ async def get_saas_llm_models_dependency(request: Request) -> list[str]:
         return get_supported_llm_models(config, verified_models)
 
 
+async def get_freegpt_llm_models_dependency(request: Request) -> list[str]:
+    """FreeGPT implementation for the LLM models endpoint.
+
+    Fetches the user's FreeGPT role from their auth token and filters
+    the available models based on role-to-model mapping from the IdP.
+    """
+    import fnmatch
+
+    from server.auth.constants import ENABLE_FREEGPT_SSO
+    from server.auth.freegpt_token_manager import FreeGPTTokenManager
+
+    from openhands.server.shared import config
+    from openhands.server.user_auth.user_auth import get_user_auth
+
+    base_models = get_supported_llm_models(config, [])
+
+    if not ENABLE_FREEGPT_SSO:
+        return base_models
+
+    try:
+        user_auth = await get_user_auth(request)
+        freegpt_role = getattr(user_auth, 'freegpt_role', 'user')
+
+        mgr = FreeGPTTokenManager()
+        allowed_patterns = await mgr.get_models_for_role(freegpt_role)
+
+        if not allowed_patterns:
+            return []
+
+        # Wildcard "*" means all models
+        if '*' in allowed_patterns:
+            return base_models
+
+        # Filter models by glob patterns
+        filtered = []
+        for model in base_models:
+            # Model names may be "provider/model_name" — check against the model part
+            model_short = model.split('/')[-1] if '/' in model else model
+            for pattern in allowed_patterns:
+                if fnmatch.fnmatch(model_short, pattern) or fnmatch.fnmatch(model, pattern):
+                    filtered.append(model)
+                    break
+        return filtered
+    except Exception:
+        # If auth fails or IdP is unreachable, return the base model list
+        return base_models
+
+
 # Override the default implementation with SaaS implementation
 # This must be called after the app is created in saas_server.py
 def override_llm_models_dependency(app):
     """Override the default LLM models implementation with SaaS version."""
-    app.dependency_overrides[public.get_llm_models_dependency] = (
-        get_saas_llm_models_dependency
-    )
+    from server.auth.constants import ENABLE_FREEGPT_SSO
+
+    if ENABLE_FREEGPT_SSO:
+        app.dependency_overrides[public.get_llm_models_dependency] = (
+            get_freegpt_llm_models_dependency
+        )
+    else:
+        app.dependency_overrides[public.get_llm_models_dependency] = (
+            get_saas_llm_models_dependency
+        )
