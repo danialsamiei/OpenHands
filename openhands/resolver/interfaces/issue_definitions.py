@@ -330,6 +330,9 @@ class ServiceContextIssue(ServiceContext):
     def request_reviewers(self, reviewer: str, pr_number: int) -> None:
         return self._strategy.request_reviewers(reviewer, pr_number)
 
+    def enable_auto_merge(self, pr_node_id: str, merge_method: str = 'SQUASH') -> bool:
+        return self._strategy.enable_auto_merge(pr_node_id, merge_method)
+
     def reply_to_comment(self, pr_number: int, comment_id: str, reply: str) -> None:
         return self._strategy.reply_to_comment(pr_number, comment_id, reply)
 

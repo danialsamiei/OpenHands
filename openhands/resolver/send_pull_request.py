@@ -260,6 +260,7 @@ def send_pull_request(
     base_domain: str | None = None,
     git_user_name: str = 'openhands',
     git_user_email: str = 'openhands@all-hands.dev',
+    auto_merge: bool = False,
 ) -> str:
     """Send a pull request to a GitHub, GitLab, Bitbucket, Forgejo, or Azure DevOps repository.
 
@@ -278,6 +279,7 @@ def send_pull_request(
         base_domain: The base domain for the git server (defaults to "github.com" for GitHub, "gitlab.com" for GitLab, "bitbucket.org" for Bitbucket, "codeberg.org" for Forgejo, and "dev.azure.com" for Azure DevOps)
         git_user_name: Git username to configure when creating commits
         git_user_email: Git email to configure when creating commits
+        auto_merge: Whether to enable auto-merge on the created pull request (GitHub only)
     """
     if pr_type not in ['branch', 'draft', 'ready']:
         raise ValueError(f'Invalid pr_type: {pr_type}')
@@ -451,6 +453,15 @@ def send_pull_request(
             number = pr_data['number']
             handler.request_reviewers(reviewer, number)
 
+        # Enable auto-merge if requested (GitHub only)
+        if auto_merge and platform == ProviderType.GITHUB and pr_type != 'draft':
+            node_id = pr_data.get('node_id')
+            if node_id:
+                if not handler.enable_auto_merge(node_id):
+                    logger.warning(
+                        'Failed to enable auto-merge on the pull request.'
+                    )
+
     logger.info(
         f'{pr_type} created: {url}\n\n--- Title: {final_pr_title}\n\n--- Body:\n{pr_body}'
     )
@@ -621,6 +632,7 @@ def process_single_issue(
     base_domain: str | None = None,
     git_user_name: str = 'openhands',
     git_user_email: str = 'openhands@all-hands.dev',
+    auto_merge: bool = False,
 ) -> None:
     # Determine default base_domain based on platform
     if base_domain is None:
@@ -699,6 +711,7 @@ def process_single_issue(
             base_domain=base_domain,
             git_user_name=git_user_name,
             git_user_email=git_user_email,
+            auto_merge=auto_merge,
         )
 
 
@@ -808,6 +821,12 @@ def main() -> None:
         default='openhands@all-hands.dev',
         help='Git user email for commits',
     )
+    parser.add_argument(
+        '--auto-merge',
+        action='store_true',
+        default=False,
+        help='Enable auto-merge on the created pull request (GitHub only, requires pr-type to be "ready")',
+    )
     my_args = parser.parse_args()
 
     token = (
@@ -869,6 +888,7 @@ def main() -> None:
         my_args.base_domain,
         my_args.git_user_name,
         my_args.git_user_email,
+        my_args.auto_merge,
     )
 
 

@@ -21,6 +21,11 @@ on:
         type: string
         default: "draft"
         description: "The PR type that is going to be created (draft, ready)"
+      auto_merge:
+        required: false
+        type: boolean
+        default: false
+        description: "Enable auto-merge on the created pull request (GitHub only, requires pr_type to be 'ready')"
       LLM_MODEL:
         required: false
         type: string
@@ -293,7 +298,8 @@ jobs:
               --issue-number ${{ env.ISSUE_NUMBER }} \
               --target-branch ${{ env.TARGET_BRANCH }} \
               --pr-type ${{ inputs.pr_type || 'draft' }} \
-              --reviewer ${{ github.actor }} | tee pr_result.txt && \
+              --reviewer ${{ github.actor }} \
+              ${{ (inputs.auto_merge == true) && '--auto-merge' || '' }} | tee pr_result.txt && \
               grep "PR created" pr_result.txt | sed 's/.*\///g' > pr_number.txt
           else
             cd /tmp && python -m openhands.resolver.send_pull_request \

@@ -282,6 +282,49 @@ class GithubIssueHandler(IssueHandlerInterface):
                 f'Failed to request review from {reviewer}: {review_response.text}'
             )
 
+    def enable_auto_merge(self, pr_node_id: str, merge_method: str = 'SQUASH') -> bool:
+        """Enable auto-merge on a pull request via GitHub GraphQL API.
+
+        Args:
+            pr_node_id: The global node ID of the pull request
+            merge_method: The merge method to use (MERGE, SQUASH, or REBASE)
+
+        Returns:
+            True if auto-merge was enabled successfully, False otherwise
+        """
+        mutation = """
+        mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+          enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) {
+            pullRequest {
+              autoMergeRequest {
+                enabledAt
+              }
+            }
+          }
+        }
+        """
+        variables = {'pullRequestId': pr_node_id, 'mergeMethod': merge_method}
+        try:
+            response = httpx.post(
+                self.get_graphql_url(),
+                headers=self.headers,
+                json={'query': mutation, 'variables': variables},
+            )
+        except Exception as e:
+            logger.warning(f'Failed to enable auto-merge due to a network error: {e}')
+            return False
+        if response.status_code != 200:
+            logger.warning(
+                f'Failed to enable auto-merge: {response.status_code} {response.text}'
+            )
+            return False
+        data = response.json()
+        if 'errors' in data:
+            logger.warning(f'Failed to enable auto-merge: {data["errors"]}')
+            return False
+        logger.info('Auto-merge enabled on pull request.')
+        return True
+
     def send_comment_msg(self, issue_number: int, msg: str) -> None:
         """Send a comment message to a GitHub issue or pull request.
 

@@ -118,6 +118,18 @@ class IssueHandlerInterface(ABC):
     def request_reviewers(self, reviewer: str, pr_number: int) -> None:
         pass
 
+    def enable_auto_merge(self, pr_node_id: str, merge_method: str = 'SQUASH') -> bool:
+        """Enable auto-merge on a pull request. Default implementation does nothing.
+
+        Args:
+            pr_node_id: The global node ID of the pull request
+            merge_method: The merge method to use (MERGE, SQUASH, or REBASE)
+
+        Returns:
+            True if auto-merge was enabled successfully, False otherwise
+        """
+        return False
+
     @abstractmethod
     def get_context_from_external_issues_references(
         self,
