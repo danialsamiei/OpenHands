@@ -51,6 +51,17 @@ BITBUCKET_DATA_CENTER_TOKEN_URL = (
     f'https://{BITBUCKET_DATA_CENTER_HOST}/rest/oauth2/latest/token'
 )
 
+# FreeGPT.ir OIDC Identity Provider
+FREEGPT_IDP_URL = os.getenv('FREEGPT_IDP_URL', '').rstrip('/')
+FREEGPT_IDP_URL_EXT = os.getenv('FREEGPT_IDP_URL_EXT', '').rstrip('/')
+FREEGPT_CLIENT_ID = os.getenv('FREEGPT_CLIENT_ID', 'openhands').strip()
+FREEGPT_CLIENT_SECRET = os.getenv('FREEGPT_CLIENT_SECRET', '').strip()
+FREEGPT_LITELLM_API_URL = os.getenv('FREEGPT_LITELLM_API_URL', '').strip()
+FREEGPT_LITELLM_API_KEY = os.getenv('FREEGPT_LITELLM_API_KEY', '').strip()
+ENABLE_FREEGPT_SSO = os.getenv('ENABLE_FREEGPT_SSO', '').strip().lower() in (
+    '1', 'true', 't', 'yes', 'y', 'on',
+)
+
 # reCAPTCHA Enterprise
 RECAPTCHA_PROJECT_ID = os.getenv('RECAPTCHA_PROJECT_ID', '').strip()
 RECAPTCHA_SITE_KEY = os.getenv('RECAPTCHA_SITE_KEY', '').strip()
