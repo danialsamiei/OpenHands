@@ -172,19 +172,24 @@ async def keycloak_callback(
 
     authorization = await user_authorizer.authorize_user(user_info)
     if not authorization.success:
+        # For duplicate_email errors, clean up the newly created Keycloak user
+        # (only if they're not already in our UserStore, i.e., they're a new user)
         if authorization.error_detail == 'duplicate_email':
             try:
                 existing_user = await UserStore.get_user_by_id(user_info.sub)
                 if not existing_user:
+                    # New user created during OAuth should be deleted from Keycloak
                     await token_manager.delete_keycloak_user(user_info.sub)
                     logger.info(
                         f'Deleted orphaned Keycloak user {user_info.sub} '
                         'after duplicate_email rejection'
                     )
             except Exception as e:
+                # Log but don't fail - user should still get 401 response
                 logger.warning(
                     f'Failed to clean up orphaned Keycloak user {user_info.sub}: {e}'
                 )
+        # Return unauthorized
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=authorization.error_detail,
@@ -197,6 +202,7 @@ async def keycloak_callback(
     if not user:
         user = await UserStore.create_user(user_id, user_info_dict)
     else:
+        # Existing user — gradually backfill contact_name if it still has a username-style value
         await UserStore.backfill_contact_name(user_id, user_info_dict)
         await UserStore.backfill_user_email(user_id, user_info_dict)
 
@@ -225,6 +231,7 @@ async def keycloak_callback(
         user_ip = request.client.host if request.client else 'unknown'
         user_agent = request.headers.get('User-Agent', '')
 
+        # Handle X-Forwarded-For for proxied requests
         forwarded_for = request.headers.get('X-Forwarded-For')
         if forwarded_for:
             user_ip = forwarded_for.split(',')[0].strip()
@@ -248,16 +255,25 @@ async def keycloak_callback(
                         'user_id': user_id,
                     },
                 )
+                # Redirect to home with error parameter
                 error_url = f'{web_url}/login?recaptcha_blocked=true'
                 return RedirectResponse(error_url, status_code=302)
 
         except Exception as e:
             logger.exception(f'reCAPTCHA verification error at callback: {e}')
+            # Fail open - continue with login if reCAPTCHA service unavailable
 
+    # Check email verification status
     email_verified = user_info.email_verified or False
     if not email_verified:
+        # Send verification email with rate limiting to prevent abuse
+        # Users who repeatedly login without verifying would otherwise trigger
+        # unlimited verification emails
+        # Import locally to avoid circular import with email.py
         from server.routes.email import verify_email
 
+        # Rate limit verification emails during auth flow (60 seconds per user)
+        # This is separate from the manual resend rate limit which uses 30 seconds
         rate_limited = False
         try:
             await check_rate_limit_by_user_id(
@@ -270,6 +286,7 @@ async def keycloak_callback(
             await verify_email(request=request, user_id=user_id, is_auth_flow=True)
         except HTTPException as e:
             if e.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+                # Rate limited - still redirect to verification page but don't send email
                 rate_limited = True
                 logger.info(
                     f'Rate limited verification email for user {user_id} during auth flow'
@@ -283,6 +300,7 @@ async def keycloak_callback(
         if rate_limited:
             verification_redirect_url = f'{verification_redirect_url}&rate_limited=true'
 
+        # Preserve invitation token so it can be included in OAuth state after verification
         if invitation_token:
             verification_redirect_url = (
                 f'{verification_redirect_url}&invitation_token={invitation_token}'
@@ -290,6 +308,8 @@ async def keycloak_callback(
         response = RedirectResponse(verification_redirect_url, status_code=302)
         return response
 
+    # default to github IDP for now.
+    # TODO: remove default once Keycloak is updated universally with the new attribute.
     idp: str = user_info.identity_provider or ProviderType.GITHUB.value
     logger.info(f'Full IDP is {idp}')
     idp_type = 'oidc'
@@ -311,6 +331,9 @@ async def keycloak_callback(
         f'keycloakAccessToken: {keycloak_access_token}, keycloakUserId: {user_id}'
     )
 
+    # adding in posthog tracking
+
+    # If this is a feature environment, add "FEATURE_" prefix to user_id for PostHog
     posthog_user_id = f'FEATURE_{user_id}' if IS_FEATURE_ENV else user_id
 
     try:
@@ -330,6 +353,7 @@ async def keycloak_callback(
                 'error': str(e),
             },
         )
+        # Continue execution as this is not critical
 
     logger.info(
         'user_logged_in',
@@ -359,6 +383,7 @@ async def keycloak_callback(
 
     has_accepted_tos = user.accepted_tos is not None
 
+    # Process invitation token if present (after email verification but before TOS)
     if invitation_token:
         try:
             logger.info(
@@ -382,6 +407,7 @@ async def keycloak_callback(
                 'Invitation expired during auth callback',
                 extra={'user_id': user_id},
             )
+            # Add query param to redirect URL
             if '?' in redirect_url:
                 redirect_url = f'{redirect_url}&invitation_expired=true'
             else:
@@ -422,11 +448,13 @@ async def keycloak_callback(
                 'Unexpected error processing invitation during auth callback',
                 extra={'user_id': user_id, 'error': str(e)},
             )
+            # Don't fail the login if invitation processing fails
             if '?' in redirect_url:
                 redirect_url = f'{redirect_url}&invitation_error=true'
             else:
                 redirect_url = f'{redirect_url}?invitation_error=true'
 
+    # If the user hasn't accepted the TOS, redirect to the TOS page
     if not has_accepted_tos:
         encoded_redirect_url = quote(redirect_url, safe='')
         tos_redirect_url = f'{web_url}/accept-tos?redirect_url={encoded_redirect_url}'
@@ -447,6 +475,9 @@ async def keycloak_callback(
         accepted_tos=has_accepted_tos,
     )
 
+    # Sync GitLab repos & set up webhooks
+    # Use Keycloak access token (first-time users lack offline token at this stage)
+    # Normally, offline token is used to fetch GitLab token via user_id
     schedule_gitlab_repo_sync(user_id, SecretStr(keycloak_access_token))
     return response
 
@@ -475,6 +506,7 @@ async def keycloak_offline_callback(code: str, state: str, request: Request):
 
     user_info = await token_manager.get_user_info(keycloak_access_token)
     logger.debug(f'user_info: {user_info}')
+    # sub is a required field in KeycloakUserInfo, validation happens in get_user_info
 
     await token_manager.store_offline_token(
         user_id=user_info.sub, offline_token=keycloak_refresh_token
@@ -620,11 +652,13 @@ async def authenticate(request: Request):
             status_code=status.HTTP_200_OK, content={'message': 'User authenticated'}
         )
     except Exception:
+        # For any error during authentication, clear the auth cookie and return 401
         response = JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={'error': 'User is not authenticated'},
         )
 
+        # Delete the auth cookie if it exists
         keycloak_auth_cookie = request.cookies.get('keycloak_auth')
         if keycloak_auth_cookie:
             response.delete_cookie(
@@ -652,10 +686,12 @@ async def accept_tos(request: Request):
             content={'error': 'User is not authenticated'},
         )
 
+    # Get redirect URL from request body
     body = await request.json()
     web_url = get_web_url(request)
     redirect_url = body.get('redirect_url', str(web_url))
 
+    # Update user settings with TOS acceptance
     accepted_tos: datetime = datetime.now(timezone.utc).replace(tzinfo=None)
     async with a_session_maker() as session:
         result = await session.execute(
@@ -691,24 +727,29 @@ async def accept_tos(request: Request):
 
 @api_router.post('/logout')
 async def logout(request: Request):
+    # Always create the response object first to ensure we can return it even if errors occur
     response = JSONResponse(
         status_code=status.HTTP_200_OK,
         content={'message': 'User logged out'},
     )
 
+    # Always delete the cookie regardless of what happens
     response.delete_cookie(
         key='keycloak_auth',
         domain=get_cookie_domain(),
         samesite=get_cookie_samesite(),
     )
 
+    # Try to properly logout from Keycloak, but don't fail if it doesn't work
     try:
         user_auth = cast(SaasUserAuth, await get_user_auth(request))
         if user_auth and user_auth.refresh_token:
             refresh_token = user_auth.refresh_token.get_secret_value()
             await token_manager.logout(refresh_token)
     except Exception as e:
+        # Log any errors but don't fail the request
         logger.debug(f'Error during logout: {str(e)}')
+        # We still want to clear the cookie and return success
 
     return response
 
