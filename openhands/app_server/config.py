@@ -249,6 +249,18 @@ def config_from_env() -> AppServerConfig:
                 docker_sandbox_kwargs['container_url_pattern'] = os.environ[
                     'SANDBOX_CONTAINER_URL_PATTERN'
                 ]
+            if os.getenv('SANDBOX_INTERNAL_CONTAINER_URL_PATTERN'):
+                docker_sandbox_kwargs['internal_container_url_pattern'] = os.environ[
+                    'SANDBOX_INTERNAL_CONTAINER_URL_PATTERN'
+                ]
+            if os.getenv('SANDBOX_DOCKER_NETWORK'):
+                docker_sandbox_kwargs['network_name'] = os.environ[
+                    'SANDBOX_DOCKER_NETWORK'
+                ]
+            if os.getenv('SANDBOX_WEBHOOK_BASE_URL'):
+                docker_sandbox_kwargs['webhook_base_url'] = os.environ[
+                    'SANDBOX_WEBHOOK_BASE_URL'
+                ]
             # Allow configuring sandbox startup grace period
             # This is useful for slower machines or cloud environments where
             # the agent-server container takes longer to initialize

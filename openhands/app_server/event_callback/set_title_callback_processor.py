@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from uuid import UUID
 
@@ -59,13 +60,32 @@ async def _poll_for_title(
         except httpx.HTTPError as exc:
             # Transient agent-server failures are acceptable; retry later.
             _logger.warning(
-                'Title poll failed for conversation %s: %s',
+                'Title poll failed for %s: %s',
+                url,
                 exc,
             )
         else:
-            title = response.json().get('title')
-            if title:
-                return title
+            try:
+                payload = response.json()
+            except (json.JSONDecodeError, ValueError) as exc:
+                _logger.warning(
+                    'Title poll returned non-JSON response for %s: %s',
+                    url,
+                    exc,
+                )
+                continue
+
+            if not isinstance(payload, dict):
+                _logger.warning(
+                    'Title poll returned unexpected payload type for %s: %s',
+                    url,
+                    type(payload).__name__,
+                )
+                continue
+
+            title = payload.get('title')
+            if isinstance(title, str) and title.strip():
+                return title.strip()
 
     return None
 

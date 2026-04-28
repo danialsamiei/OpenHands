@@ -12,10 +12,12 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 
 from openhands.app_server.event_callback.webhook_router import (
+    on_event,
     router as webhook_router,
 )
 from openhands.app_server.event_callback.webhook_router import (
     valid_conversation,
+    valid_event_conversation,
     valid_sandbox,
 )
 from openhands.app_server.sandbox.sandbox_models import SandboxInfo, SandboxStatus
@@ -51,6 +53,8 @@ def create_mock_request():
     """Create a mock FastAPI Request object with proper state."""
     request = MagicMock()
     request.state = MockRequestState()
+    request.client = MagicMock()
+    request.client.host = '127.0.0.1'
     return request
 
 
@@ -535,6 +539,144 @@ class TestWebhookAuthenticationIntegration:
                 sandbox_info=sandbox_result,
                 app_conversation_info_service=mock_conversation_service,
             )
+
+
+class TestValidEventConversation:
+    """Tests for the internal-runtime fallback on event webhooks."""
+
+    @pytest.mark.asyncio
+    async def test_valid_event_conversation_allows_trusted_internal_client_without_key(
+        self,
+    ):
+        """Trusted runtime callbacks on the Docker network may omit the session key."""
+        conversation_id = uuid4()
+        mock_request = create_mock_request()
+        mock_request.client.host = '172.19.0.15'
+
+        conversation_info = MagicMock()
+        conversation_info.created_by_user_id = 'user-123'
+
+        mock_service = AsyncMock()
+        mock_service.get_app_conversation_info = AsyncMock(
+            return_value=conversation_info
+        )
+
+        result = await valid_event_conversation(
+            request=mock_request,
+            conversation_id=conversation_id,
+            session_api_key=None,
+            app_conversation_info_service=mock_service,
+        )
+
+        assert result == conversation_info
+        assert USER_CONTEXT_ATTR in mock_request.state._attributes
+        user_context = mock_request.state._attributes[USER_CONTEXT_ATTR]
+        assert isinstance(user_context, SpecifyUserContext)
+        assert user_context.user_id == 'user-123'
+
+    @pytest.mark.asyncio
+    async def test_valid_event_conversation_rejects_untrusted_client_without_key(
+        self,
+    ):
+        """External callers still need X-Session-API-Key on event webhooks."""
+        mock_request = create_mock_request()
+        mock_request.client.host = '172.18.0.5'
+
+        mock_service = AsyncMock()
+        mock_service.get_app_conversation_info = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await valid_event_conversation(
+                request=mock_request,
+                conversation_id=uuid4(),
+                session_api_key=None,
+                app_conversation_info_service=mock_service,
+            )
+
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert 'X-Session-API-Key header is required' in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_valid_event_conversation_backfills_user_from_start_task_when_missing(
+        self,
+    ):
+        """If conversation metadata has no owner yet, the start task owner should be used."""
+        conversation_id = uuid4()
+        mock_request = create_mock_request()
+        mock_request.client.host = '172.19.0.15'
+
+        conversation_info = MagicMock()
+        conversation_info.created_by_user_id = None
+
+        mock_service = AsyncMock()
+        mock_service.get_app_conversation_info = AsyncMock(
+            return_value=conversation_info
+        )
+
+        with patch(
+            'openhands.app_server.event_callback.webhook_router._resolve_internal_webhook_user_id',
+            AsyncMock(return_value='deploy-smoke'),
+        ):
+            result = await valid_event_conversation(
+                request=mock_request,
+                conversation_id=conversation_id,
+                session_api_key=None,
+                app_conversation_info_service=mock_service,
+            )
+
+        assert result == conversation_info
+        assert conversation_info.created_by_user_id == 'deploy-smoke'
+        assert USER_CONTEXT_ATTR in mock_request.state._attributes
+        user_context = mock_request.state._attributes[USER_CONTEXT_ATTR]
+        assert isinstance(user_context, SpecifyUserContext)
+        assert user_context.user_id == 'deploy-smoke'
+        assert 'user_auth' in mock_request.state._attributes
+
+    @pytest.mark.asyncio
+    async def test_on_event_resolves_event_service_after_user_context_is_set(self):
+        """Internal runtime events should resolve EventService after user context exists."""
+        conversation_id = uuid4()
+        mock_request = create_mock_request()
+        mock_request.client.host = '172.19.0.15'
+
+        conversation_info = MagicMock()
+        conversation_info.created_by_user_id = 'user-123'
+
+        mock_info_service = AsyncMock()
+        mock_info_service.get_app_conversation_info = AsyncMock(
+            return_value=conversation_info
+        )
+
+        validated = await valid_event_conversation(
+            request=mock_request,
+            conversation_id=conversation_id,
+            session_api_key=None,
+            app_conversation_info_service=mock_info_service,
+        )
+
+        saved_events = []
+
+        @contextlib.asynccontextmanager
+        async def event_service_context(state, request=None):
+            assert USER_CONTEXT_ATTR in mock_request.state._attributes
+            event_service = AsyncMock()
+            event_service.save_event = AsyncMock(side_effect=lambda cid, event: saved_events.append((cid, event)))
+            yield event_service
+
+        with patch(
+            'openhands.app_server.event_callback.webhook_router.get_event_service',
+            event_service_context,
+        ):
+            result = await on_event(
+                request=mock_request,
+                events=[],
+                conversation_id=conversation_id,
+                app_conversation_info=validated,
+                app_conversation_info_service=mock_info_service,
+            )
+
+        assert result is not None
+        assert saved_events == []
 
 
 class TestWebhookRouterHTTPIntegration:

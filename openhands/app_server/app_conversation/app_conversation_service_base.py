@@ -47,6 +47,22 @@ PRE_COMMIT_HOOK = '.git/hooks/pre-commit'
 PRE_COMMIT_LOCAL = '.git/hooks/pre-commit.local'
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _skill_loading_flags() -> dict[str, bool]:
+    return {
+        'load_public': _env_flag('FREEGPT_OPENHANDS_LOAD_PUBLIC_SKILLS', False),
+        'load_user': _env_flag('FREEGPT_OPENHANDS_LOAD_USER_SKILLS', False),
+        'load_project': _env_flag('FREEGPT_OPENHANDS_LOAD_PROJECT_SKILLS', True),
+        'load_org': _env_flag('FREEGPT_OPENHANDS_LOAD_ORG_SKILLS', False),
+    }
+
+
 def get_project_dir(
     working_dir: str,
     selected_repository: str | None = None,
@@ -130,6 +146,8 @@ class AppConversationServiceBase(AppConversationService, ABC):
             # Build sandbox config (exposed URLs)
             sandbox_config = build_sandbox_config(sandbox)
 
+            skill_flags = _skill_loading_flags()
+
             # Single API call to agent-server for ALL skills
             all_skills = await load_skills_from_agent_server(
                 agent_server_url=agent_server_url,
@@ -137,14 +155,15 @@ class AppConversationServiceBase(AppConversationService, ABC):
                 project_dir=project_dir,
                 org_config=org_config,
                 sandbox_config=sandbox_config,
-                load_public=True,
-                load_user=True,
-                load_project=True,
-                load_org=True,
+                load_public=skill_flags['load_public'],
+                load_user=skill_flags['load_user'],
+                load_project=skill_flags['load_project'],
+                load_org=skill_flags['load_org'],
             )
 
             _logger.info(
-                f'Loaded {len(all_skills)} total skills from agent-server: '
+                f'Loaded {len(all_skills)} total skills from agent-server with '
+                f'flags={skill_flags}: '
                 f'{[s.name for s in all_skills]}'
             )
 

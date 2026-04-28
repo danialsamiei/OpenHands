@@ -1,0 +1,14 @@
+hands.gantor.ir {
+	encode zstd gzip
+
+	@runtime path /runtime/*
+	handle @runtime {
+		@runtime_port path_regexp runtime_port ^/runtime/([0-9]+)(/.*)?$
+		uri path_regexp ^/runtime/[0-9]+(/.*)?$ $1
+		reverse_proxy @runtime_port host.docker.internal:{re.runtime_port.1}
+	}
+
+	handle {
+		reverse_proxy qadr-openhands:3000
+	}
+}

@@ -7,12 +7,17 @@ enable_browser = true
 default_agent = "CodeActAgent"
 
 [llm]
-model = "openai/gpt-4.1-mini"
-base_url = "http://qadr-ai-gateway-litellm:4000/v1"
-api_key = "REPLACE_WITH_LITELLM_MASTER_KEY"
-custom_llm_provider = "openai"
+model = "ollama/qwen2.5:3b"
+base_url = "http://qadr-local-llm-ollama:11434"
+ollama_base_url = "http://qadr-local-llm-ollama:11434"
+api_key = "ollama-local-placeholder"
 temperature = 0.0
 max_budget_per_task = 0.0
+
+# Optional managed fallback if you want to force the shared LiteLLM gateway:
+# model = "anthropic/claude-sonnet-4-20250514"
+# base_url = "http://qadr-ai-gateway-litellm:4000/v1"
+# api_key = "REPLACE_WITH_GATEWAY_SERVICE_KEY"
 
 [agent]
 enable_browsing = true

@@ -84,6 +84,7 @@ class DockerSandboxService(SandboxService):
     container_name_prefix: str
     host_port: int
     container_url_pattern: str
+    internal_container_url_pattern: str | None
     mounts: list[VolumeMount]
     exposed_ports: list[ExposedPort]
     health_check_path: str | None
@@ -92,9 +93,16 @@ class DockerSandboxService(SandboxService):
     web_url: str | None = None
     permitted_cors_origins: list[str] = field(default_factory=list)
     extra_hosts: dict[str, str] = field(default_factory=dict)
+    network_name: str | None = None
+    webhook_base_url: str | None = None
     docker_client: docker.DockerClient = field(default_factory=get_docker_client)
     startup_grace_seconds: int = STARTUP_GRACE_SECONDS
     use_host_network: bool = False
+
+    def _get_webhook_callback_base_url(self) -> str:
+        if self.webhook_base_url:
+            return self.webhook_base_url.rstrip('/')
+        return f'http://host.docker.internal:{self.host_port}/api/v1/webhooks'
 
     def _find_unused_port(self) -> int:
         """Find an unused port on the host machine."""
@@ -230,10 +238,8 @@ class DockerSandboxService(SandboxService):
             and self.health_check_path is not None
             and sandbox_info.exposed_urls
         ):
-            app_server_url = next(
-                exposed_url.url
-                for exposed_url in sandbox_info.exposed_urls
-                if exposed_url.name == AGENT_SERVER
+            app_server_url = self._get_agent_server_url_for_healthcheck(
+                container, sandbox_info
             )
             try:
                 # When running in Docker, replace localhost hostname with host.docker.internal for internal requests
@@ -263,6 +269,54 @@ class DockerSandboxService(SandboxService):
                 sandbox_info.exposed_urls = None
                 sandbox_info.session_api_key = None
         return sandbox_info
+
+    def _format_internal_container_url(
+        self, container_name: str, port: int
+    ) -> str:
+        assert self.internal_container_url_pattern is not None
+        return self.internal_container_url_pattern.format(
+            port=port,
+            sandbox_id=container_name,
+            container_name=container_name,
+        )
+
+    def _get_agent_server_url_for_healthcheck(
+        self, container, sandbox_info: SandboxInfo
+    ) -> str:
+        if self.internal_container_url_pattern:
+            network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
+            if network_mode == 'host':
+                return self._format_internal_container_url(container.name, 8000)
+
+            port_bindings = container.attrs.get('NetworkSettings', {}).get('Ports', {})
+            host_bindings = port_bindings.get('8000/tcp')
+            if self.network_name:
+                return self._format_internal_container_url(
+                    container.name,
+                    8000,
+                )
+            if host_bindings:
+                return self._format_internal_container_url(
+                    container.name,
+                    int(host_bindings[0]['HostPort']),
+                )
+
+        return next(
+            exposed_url.url
+            for exposed_url in sandbox_info.exposed_urls or []
+            if exposed_url.name == AGENT_SERVER
+        )
+
+    def _get_agent_server_url(self, sandbox: SandboxInfo) -> str:
+        if self.internal_container_url_pattern:
+            try:
+                container = self.docker_client.containers.get(sandbox.id)
+                return replace_localhost_hostname_for_docker(
+                    self._get_agent_server_url_for_healthcheck(container, sandbox)
+                )
+            except (NotFound, APIError):
+                pass
+        return super()._get_agent_server_url(sandbox)
 
     async def search_sandboxes(
         self,
@@ -379,9 +433,7 @@ class DockerSandboxService(SandboxService):
         # Prepare environment variables
         env_vars = sandbox_spec.initial_env.copy()
         env_vars[SESSION_API_KEY_VARIABLE] = session_api_key
-        env_vars[WEBHOOK_CALLBACK_VARIABLE] = (
-            f'http://host.docker.internal:{self.host_port}/api/v1/webhooks'
-        )
+        env_vars[WEBHOOK_CALLBACK_VARIABLE] = self._get_webhook_callback_base_url()
 
         # Set CORS origins for remote browser access when web_url is configured.
         # This allows the agent-server container to accept requests from the
@@ -429,11 +481,16 @@ class DockerSandboxService(SandboxService):
             for mount in self.mounts
         }
 
-        # Determine network mode
+        # Determine networking mode
         network_mode = 'host' if self.use_host_network else None
+        container_network = self.network_name if not self.use_host_network else None
 
         if self.use_host_network:
             _logger.info(f'Starting sandbox {container_name} with host network mode')
+        elif container_network:
+            _logger.info(
+                f'Starting sandbox {container_name} on docker network {container_network}'
+            )
 
         try:
             # Create and start the container
@@ -457,6 +514,7 @@ class DockerSandboxService(SandboxService):
                 extra_hosts=self.extra_hosts
                 if self.extra_hosts and not self.use_host_network
                 else None,
+                network=container_network,
                 # Network mode: 'host' for host networking, None for default bridge
                 network_mode=network_mode,
             )
@@ -540,6 +598,15 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
             'Configure via OH_SANDBOX_CONTAINER_URL_PATTERN environment variable.'
         ),
     )
+    internal_container_url_pattern: str | None = Field(
+        default=None,
+        description=(
+            'Optional URL pattern used only for server-side sandbox health checks. '
+            'Use this when the public runtime URL is not reachable from inside the '
+            'OpenHands container. Configure via OH_SANDBOX_INTERNAL_CONTAINER_URL_PATTERN '
+            'or the legacy SANDBOX_INTERNAL_CONTAINER_URL_PATTERN environment variable.'
+        ),
+    )
     host_port: int = Field(
         default=3000,
         description=(
@@ -603,6 +670,21 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
             'Format: {"hostname": "ip_or_gateway"}'
         ),
     )
+    network_name: str | None = Field(
+        default=None,
+        description=(
+            'Optional Docker network name for agent-server containers. '
+            'Use this when sandboxes need direct container-to-container access '
+            'to the OpenHands app container or other internal services.'
+        ),
+    )
+    webhook_base_url: str | None = Field(
+        default=None,
+        description=(
+            'Optional base URL injected into sandbox containers for webhook callbacks. '
+            'Example: http://qadr-openhands:3000/api/v1/webhooks'
+        ),
+    )
     startup_grace_seconds: int = Field(
         default=STARTUP_GRACE_SECONDS,
         description=(
@@ -644,6 +726,7 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
                 container_name_prefix=self.container_name_prefix,
                 host_port=self.host_port,
                 container_url_pattern=self.container_url_pattern,
+                internal_container_url_pattern=self.internal_container_url_pattern,
                 mounts=self.mounts,
                 exposed_ports=self.exposed_ports,
                 health_check_path=self.health_check_path,
@@ -652,6 +735,8 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
                 web_url=web_url,
                 permitted_cors_origins=config.permitted_cors_origins,
                 extra_hosts=self.extra_hosts,
+                network_name=self.network_name,
+                webhook_base_url=self.webhook_base_url,
                 startup_grace_seconds=self.startup_grace_seconds,
                 use_host_network=self.use_host_network,
             )

@@ -107,6 +107,80 @@ from openhands.tools.preset.planning import (
 _conversation_info_type_adapter = TypeAdapter(list[ConversationInfo | None])
 _logger = logging.getLogger(__name__)
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _env_int(name: str, default: int | None) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float | None) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
+
+
+def _env_optional_str(name: str, default: str | None) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        return None
+    return value
+
+
+def _managed_llm_kwargs(model: str | None, base_url: str | None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        'timeout': _env_int('QADR_OPENHANDS_LLM_TIMEOUT', 300),
+        'max_message_chars': _env_int('QADR_OPENHANDS_LLM_MAX_MESSAGE_CHARS', 30000),
+        'temperature': _env_float('QADR_OPENHANDS_LLM_TEMPERATURE', 0.0),
+        'max_output_tokens': _env_int('QADR_OPENHANDS_LLM_MAX_OUTPUT_TOKENS', None),
+        'num_retries': _env_int('QADR_OPENHANDS_LLM_NUM_RETRIES', 2),
+        'retry_min_wait': _env_int('QADR_OPENHANDS_LLM_RETRY_MIN_WAIT', 2),
+        'retry_max_wait': _env_int('QADR_OPENHANDS_LLM_RETRY_MAX_WAIT', 8),
+        'retry_multiplier': _env_float('QADR_OPENHANDS_LLM_RETRY_MULTIPLIER', 2.0),
+        'caching_prompt': _env_bool('QADR_OPENHANDS_LLM_CACHING_PROMPT', False),
+        'native_tool_calling': _env_bool(
+            'QADR_OPENHANDS_LLM_NATIVE_TOOL_CALLING', True
+        ),
+        'enable_encrypted_reasoning': _env_bool(
+            'QADR_OPENHANDS_LLM_ENABLE_ENCRYPTED_REASONING', False
+        ),
+        'disable_stop_word': _env_bool(
+            'QADR_OPENHANDS_LLM_DISABLE_STOP_WORD', False
+        ),
+    }
+    reasoning_effort = _env_optional_str('QADR_OPENHANDS_LLM_REASONING_EFFORT', 'none')
+    if reasoning_effort:
+        kwargs['reasoning_effort'] = reasoning_effort
+    extended_thinking_budget = _env_int(
+        'QADR_OPENHANDS_LLM_EXTENDED_THINKING_BUDGET', 0
+    )
+    if extended_thinking_budget and extended_thinking_budget > 0:
+        kwargs['extended_thinking_budget'] = extended_thinking_budget
+    else:
+        kwargs['extended_thinking_budget'] = None
+    if model and model.startswith('ollama/') and base_url:
+        kwargs['ollama_base_url'] = base_url
+    return kwargs
+
+
 # Planning agent instruction to prevent "Ready to proceed?" behavior
 PLANNING_AGENT_INSTRUCTION = """<IMPORTANT_PLANNING_BOUNDARIES>
 You are a Planning Agent that can ONLY create plans - you CANNOT execute code or make changes.
@@ -736,6 +810,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
     def _get_agent_server_url(self, sandbox: SandboxInfo) -> str:
         """Get agent server url for running sandbox."""
+        if isinstance(self.sandbox_service, DockerSandboxService):
+            return self.sandbox_service._get_agent_server_url(sandbox)
+
         exposed_urls = sandbox.exposed_urls
         assert exposed_urls is not None
         agent_server_url = next(
@@ -893,11 +970,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         if model and model.startswith('openhands/'):
             base_url = user.llm_base_url or self.openhands_provider_base_url
 
+        llm_kwargs = _managed_llm_kwargs(model, base_url)
+
         return LLM(
             model=model,
             base_url=base_url,
             api_key=user.llm_api_key,
             usage_id='agent',
+            **llm_kwargs,
         )
 
     async def _get_tavily_api_key(self, user: UserInfo) -> str | None:
@@ -937,8 +1017,11 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         if not self.web_url:
             return
 
+        internal_mcp_base = os.getenv('OH_INTERNAL_MCP_URL', '').strip().rstrip('/')
+        mcp_base_url = internal_mcp_base or self.web_url
+
         # Add default OpenHands MCP server
-        mcp_url = f'{self.web_url}/mcp/mcp'
+        mcp_url = f'{mcp_base_url}/mcp/mcp'
         mcp_servers['default'] = {
             'url': mcp_url,
             'headers': {'X-OpenHands-ServerConversation-ID': str(conversation_id)},

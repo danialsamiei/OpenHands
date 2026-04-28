@@ -3,13 +3,17 @@
 import asyncio
 import importlib
 import logging
+import os
 import pkgutil
+from ipaddress import ip_address, ip_network
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import APIKeyHeader
 from jwt import InvalidTokenError
 from pydantic import SecretStr
+from sqlalchemy import text
+from starlette.datastructures import State
 
 from openhands import tools  # type: ignore[attr-defined]
 from openhands.agent_server.models import ConversationInfo, Success
@@ -21,14 +25,14 @@ from openhands.app_server.app_conversation.app_conversation_models import (
 )
 from openhands.app_server.config import (
     depends_app_conversation_info_service,
-    depends_event_service,
     depends_jwt_service,
+    get_db_session,
+    get_event_service,
     get_event_callback_service,
     get_global_config,
     get_sandbox_service,
 )
 from openhands.app_server.errors import AuthError
-from openhands.app_server.event.event_service import EventService
 from openhands.app_server.sandbox.sandbox_models import SandboxInfo
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.services.jwt_service import JwtService
@@ -48,11 +52,62 @@ from openhands.server.user_auth.user_auth import (
 )
 
 router = APIRouter(prefix='/webhooks', tags=['Webhooks'])
-event_service_dependency = depends_event_service()
 app_conversation_info_service_dependency = depends_app_conversation_info_service()
 jwt_dependency = depends_jwt_service()
 app_mode = get_global_config().app_mode
 _logger = logging.getLogger(__name__)
+
+
+def _trusted_internal_webhook_networks() -> list:
+    configured = os.getenv(
+        'FREEGPT_OPENHANDS_INTERNAL_WEBHOOK_CIDRS',
+        '172.19.0.0/16,127.0.0.1/32,::1/128',
+    )
+    result = []
+    for item in configured.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            result.append(ip_network(item, strict=False))
+        except ValueError:
+            _logger.warning('Ignoring invalid webhook CIDR %s', item)
+    return result
+
+
+def _is_trusted_internal_webhook_request(request: Request) -> bool:
+    client = getattr(request, 'client', None)
+    client_host = getattr(client, 'host', '') if client else ''
+    if not client_host:
+        return False
+    try:
+        client_ip = ip_address(client_host)
+    except ValueError:
+        return False
+    return any(client_ip in network for network in _trusted_internal_webhook_networks())
+
+
+async def _resolve_internal_webhook_user_id(
+    request: Request, conversation_id: UUID
+) -> str | None:
+    async with get_db_session(request.state, request) as db_session:
+        result = await db_session.execute(
+            text(
+                """
+                SELECT created_by_user_id
+                FROM app_conversation_start_task
+                WHERE app_conversation_id IN (:conversation_uuid, :conversation_hex)
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                'conversation_uuid': str(conversation_id),
+                'conversation_hex': conversation_id.hex,
+            },
+        )
+        user_id = result.scalar_one_or_none()
+        return user_id or None
 
 
 async def valid_sandbox(
@@ -124,6 +179,55 @@ async def valid_conversation(
     return app_conversation_info
 
 
+async def valid_event_conversation(
+    request: Request,
+    conversation_id: UUID,
+    session_api_key: str | None = Depends(
+        APIKeyHeader(name='X-Session-API-Key', auto_error=False)
+    ),
+    app_conversation_info_service: AppConversationInfoService = app_conversation_info_service_dependency,
+) -> AppConversationInfo:
+    if session_api_key:
+        sandbox_info = await valid_sandbox(request, session_api_key)
+        return await valid_conversation(
+            conversation_id, sandbox_info, app_conversation_info_service
+        )
+
+    if not _is_trusted_internal_webhook_request(request):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail='X-Session-API-Key header is required'
+        )
+
+    app_conversation_info = (
+        await app_conversation_info_service.get_app_conversation_info(conversation_id)
+    )
+    if not app_conversation_info:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail='Internal webhook conversation was not found',
+        )
+
+    user_id = app_conversation_info.created_by_user_id
+    if not user_id:
+        user_id = await _resolve_internal_webhook_user_id(request, conversation_id)
+        if user_id:
+            app_conversation_info.created_by_user_id = user_id
+
+    if user_id:
+        setattr(
+            request.state,
+            USER_CONTEXT_ATTR,
+            SpecifyUserContext(user_id),
+        )
+        setattr(
+            request.state,
+            'user_auth',
+            await get_user_auth_for_user(user_id),
+        )
+
+    return app_conversation_info
+
+
 @router.post('/conversations')
 async def on_conversation_update(
     conversation_info: ConversationInfo,
@@ -165,25 +269,53 @@ async def on_conversation_update(
 
 @router.post('/events/{conversation_id}')
 async def on_event(
+    request: Request,
     events: list[Event],
     conversation_id: UUID,
-    app_conversation_info: AppConversationInfo = Depends(valid_conversation),
+    app_conversation_info: AppConversationInfo = Depends(valid_event_conversation),
     app_conversation_info_service: AppConversationInfoService = app_conversation_info_service_dependency,
-    event_service: EventService = event_service_dependency,
 ) -> Success:
     """Webhook callback for when event stream events occur."""
     try:
-        # Save events...
-        await asyncio.gather(
-            *[event_service.save_event(conversation_id, event) for event in events]
-        )
+        event_state = request.state
+        resolved_user_id = app_conversation_info.created_by_user_id
+        if not resolved_user_id:
+            resolved_user_id = await _resolve_internal_webhook_user_id(
+                request, conversation_id
+            )
+            if resolved_user_id:
+                app_conversation_info.created_by_user_id = resolved_user_id
 
-        # Process stats events for V1 conversations
-        for event in events:
-            if isinstance(event, ConversationStateUpdateEvent) and event.key == 'stats':
-                await app_conversation_info_service.process_stats_event(
-                    event, conversation_id
-                )
+        if resolved_user_id:
+            event_state = State()
+            setattr(
+                event_state,
+                USER_CONTEXT_ATTR,
+                SpecifyUserContext(resolved_user_id),
+            )
+            setattr(
+                event_state,
+                'user_auth',
+                await get_user_auth_for_user(resolved_user_id),
+            )
+
+        # Resolve the event service only after valid_event_conversation has had a
+        # chance to populate request.state with the conversation owner's context.
+        async with get_event_service(event_state, request) as event_service:
+            # Save events...
+            await asyncio.gather(
+                *[event_service.save_event(conversation_id, event) for event in events]
+            )
+
+            # Process stats events for V1 conversations
+            for event in events:
+                if (
+                    isinstance(event, ConversationStateUpdateEvent)
+                    and event.key == 'stats'
+                ):
+                    await app_conversation_info_service.process_stats_event(
+                        event, conversation_id
+                    )
 
         asyncio.create_task(
             _run_callbacks_in_bg_and_close(
