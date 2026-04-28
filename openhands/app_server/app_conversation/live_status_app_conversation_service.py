@@ -736,6 +736,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
     def _get_agent_server_url(self, sandbox: SandboxInfo) -> str:
         """Get agent server url for running sandbox."""
+        if isinstance(self.sandbox_service, DockerSandboxService):
+            return self.sandbox_service._get_agent_server_url(sandbox)
+
         exposed_urls = sandbox.exposed_urls
         assert exposed_urls is not None
         agent_server_url = next(

@@ -84,6 +84,7 @@ class DockerSandboxService(SandboxService):
     container_name_prefix: str
     host_port: int
     container_url_pattern: str
+    internal_container_url_pattern: str | None
     mounts: list[VolumeMount]
     exposed_ports: list[ExposedPort]
     health_check_path: str | None
@@ -230,10 +231,8 @@ class DockerSandboxService(SandboxService):
             and self.health_check_path is not None
             and sandbox_info.exposed_urls
         ):
-            app_server_url = next(
-                exposed_url.url
-                for exposed_url in sandbox_info.exposed_urls
-                if exposed_url.name == AGENT_SERVER
+            app_server_url = self._get_agent_server_url_for_healthcheck(
+                container, sandbox_info
             )
             try:
                 # When running in Docker, replace localhost hostname with host.docker.internal for internal requests
@@ -263,6 +262,38 @@ class DockerSandboxService(SandboxService):
                 sandbox_info.exposed_urls = None
                 sandbox_info.session_api_key = None
         return sandbox_info
+
+    def _get_agent_server_url_for_healthcheck(
+        self, container, sandbox_info: SandboxInfo
+    ) -> str:
+        if self.internal_container_url_pattern:
+            network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
+            if network_mode == 'host':
+                return self.internal_container_url_pattern.format(port=8000)
+
+            port_bindings = container.attrs.get('NetworkSettings', {}).get('Ports', {})
+            host_bindings = port_bindings.get('8000/tcp')
+            if host_bindings:
+                return self.internal_container_url_pattern.format(
+                    port=int(host_bindings[0]['HostPort'])
+                )
+
+        return next(
+            exposed_url.url
+            for exposed_url in sandbox_info.exposed_urls or []
+            if exposed_url.name == AGENT_SERVER
+        )
+
+    def _get_agent_server_url(self, sandbox: SandboxInfo) -> str:
+        if self.internal_container_url_pattern:
+            try:
+                container = self.docker_client.containers.get(sandbox.id)
+                return replace_localhost_hostname_for_docker(
+                    self._get_agent_server_url_for_healthcheck(container, sandbox)
+                )
+            except (NotFound, APIError):
+                pass
+        return super()._get_agent_server_url(sandbox)
 
     async def search_sandboxes(
         self,
@@ -540,6 +571,15 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
             'Configure via OH_SANDBOX_CONTAINER_URL_PATTERN environment variable.'
         ),
     )
+    internal_container_url_pattern: str | None = Field(
+        default=None,
+        description=(
+            'Optional URL pattern used only for server-side sandbox health checks. '
+            'Use this when the public runtime URL is not reachable from inside the '
+            'OpenHands container. Configure via OH_SANDBOX_INTERNAL_CONTAINER_URL_PATTERN '
+            'or the legacy SANDBOX_INTERNAL_CONTAINER_URL_PATTERN environment variable.'
+        ),
+    )
     host_port: int = Field(
         default=3000,
         description=(
@@ -644,6 +684,7 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
                 container_name_prefix=self.container_name_prefix,
                 host_port=self.host_port,
                 container_url_pattern=self.container_url_pattern,
+                internal_container_url_pattern=self.internal_container_url_pattern,
                 mounts=self.mounts,
                 exposed_ports=self.exposed_ports,
                 health_check_path=self.health_check_path,

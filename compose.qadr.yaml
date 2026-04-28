@@ -12,12 +12,25 @@ services:
       AGENT_SERVER_IMAGE_REPOSITORY: ${AGENT_SERVER_IMAGE_REPOSITORY:-ghcr.io/openhands/agent-server}
       AGENT_SERVER_IMAGE_TAG: ${AGENT_SERVER_IMAGE_TAG:-1.12.0-python}
       SANDBOX_USER_ID: ${SANDBOX_USER_ID:-0}
+      SANDBOX_CONTAINER_URL_PATTERN: ${SANDBOX_CONTAINER_URL_PATTERN:-https://hands.gantor.ir/runtime/{port}}
+      SANDBOX_INTERNAL_CONTAINER_URL_PATTERN: ${SANDBOX_INTERNAL_CONTAINER_URL_PATTERN:-http://host.docker.internal:{port}}
       WORKSPACE_MOUNT_PATH: /opt/workspace_base
       HOME: /.openhands
+      OH_PERSISTENCE_DIR: /.openhands
+      OH_WEB_URL: ${OH_WEB_URL:-https://hands.gantor.ir}
+      OH_PERMITTED_CORS_ORIGINS_0: ${OH_PERMITTED_CORS_ORIGINS_0:-https://hands.gantor.ir}
+      WEB_HOST: ${WEB_HOST:-hands.gantor.ir}
       TZ: Asia/Tehran
       SERVE_FRONTEND: "true"
       FILE_STORE: local
       FILE_STORE_PATH: /.openhands
+      OPENHANDS_CONFIG_CLS: ${OPENHANDS_CONFIG_CLS:-openhands.qadr.server_config.QadrServerConfig}
+      FREEGPT_OPENHANDS_REQUIRE_LOGIN: ${FREEGPT_OPENHANDS_REQUIRE_LOGIN:-true}
+      FREEGPT_AUTH_BASE_URL: ${FREEGPT_AUTH_BASE_URL:-http://qadr-openwebui-app:8080}
+      FREEGPT_OPENHANDS_SESSION_SECRET: ${FREEGPT_OPENHANDS_SESSION_SECRET:?set-in-env-file}
+      FREEGPT_OPENHANDS_DEFAULT_LANGUAGE: ${FREEGPT_OPENHANDS_DEFAULT_LANGUAGE:-fa}
+      HIDE_LLM_SETTINGS: ${HIDE_LLM_SETTINGS:-true}
+      AUTH_URL: ${AUTH_URL:-https://hands.gantor.ir/auth/login}
     ports:
       - "127.0.0.1:${OPENHANDS_PORT:-39030}:3000"
     extra_hosts:
@@ -33,7 +46,7 @@ services:
     cpus: 3.00
     mem_limit: 4096m
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

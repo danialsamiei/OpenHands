@@ -26,6 +26,7 @@ import openhands.agenthub  # noqa F401 (we import this to get the agents registe
 from openhands.app_server import v1_router
 from openhands.app_server.config import get_app_lifespan_service
 from openhands.integrations.service_types import AuthenticationError
+from openhands.qadr.app_auth import install_qadr_auth
 from openhands.server.routes.conversation import app as conversation_api_router
 from openhands.server.routes.feedback import app as feedback_api_router
 from openhands.server.routes.files import app as files_api_router
@@ -78,6 +79,7 @@ app = FastAPI(
     lifespan=combine_lifespans(*lifespans),
     routes=[Mount(path='/mcp', app=mcp_app)],
 )
+install_qadr_auth(app)
 
 
 @app.exception_handler(AuthenticationError)
